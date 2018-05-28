@@ -1,4 +1,5 @@
 // WEMOS LOLIN32 - 80MHz
+#include <NTPClient.h>
 
 #define MAX_TEMPO_SEM_AGUA 5000 // ms
 
@@ -134,13 +135,20 @@ void initUI() {
 
 // WIFI ******************************************************************
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <HTTPClient.h>
 
 const char* ssid     = "foraTemer";
 const char* password = "morcegopreto";
 String IP;
+
 WiFiServer server(80);
 HTTPClient http;
+
+WiFiUDP ntpUDP;
+int16_t utc = -3; //UTC -3:00 Brazil
+NTPClient timeClient(ntpUDP, "a.st1.ntp.br", utc*3600, 60000);
+
 const char* root_ca = \
                       "-----BEGIN CERTIFICATE-----\n" \
                       "MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjANBgkqhkiG9w0BAQUFADBh\n" \
@@ -184,6 +192,9 @@ void initWifi() {
 
   IP = WiFi.localIP().toString();
   server.begin();
+
+  timeClient.begin();
+  timeClient.update();
 }
 
 void handleHTTP() {
@@ -225,10 +236,10 @@ void handleHTTP() {
 
       // Check to see if the client request was "GET /H" or "GET /L":
       if (currentLine.endsWith("GET /H")) {
-        digitalWrite(5, HIGH);               // GET /H turns the LED on
+        digitalWrite(12, HIGH);               // GET /H turns the LED on
       }
       if (currentLine.endsWith("GET /L")) {
-        digitalWrite(5, LOW);                // GET /L turns the LED off
+        digitalWrite(12, LOW);                // GET /L turns the LED off
       }
     }
   }
@@ -274,6 +285,8 @@ void setup() {
   pinMode(39, INPUT);
   pinMode(36, INPUT);
   pinMode(0,  INPUT);
+
+  pinMode(12, OUTPUT);
 
   initUI();
 
@@ -368,6 +381,25 @@ void confereCenas() {
   }
 }
 
+
+void confereLuzPlantas() {
+  int hora = timeClient.getHours();
+
+   printf("hora: %d \n", hora);
+
+  if ( hora < 7 ) {
+    digitalWrite(12, LOW);
+  } else {
+    if ( hora >= 18 ) {
+      digitalWrite(12, LOW);
+    } else {
+      digitalWrite(12, HIGH);
+    }
+  }
+}
+
+
+int cnt = 1000;
 void loop() {
   confereCenas();
 
@@ -391,4 +423,23 @@ void loop() {
   // Ao inves de delay podemos ficar "em processamento" ate que acabe o "budget"
   if (remainingTimeBudget > 0)
     delay(remainingTimeBudget);
+
+
+  
+  
+  
+  if(cnt++ >= 50) {
+    cnt = 0;
+    printf("Time Epoch: %d: \n", timeClient.getEpochTime());
+    Serial.println(timeClient.getFormattedTime());
+
+    /*digitalWrite(12, rele);
+    rele = 1 - rele;*/
+
+    confereLuzPlantas();
+  }
 }
+
+
+
+
