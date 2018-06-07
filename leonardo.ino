@@ -1,8 +1,8 @@
 #define VERSAO 99       // Versão 0.99
 #define VCC     5 * 100 // 5V * 100 = 2 casas decimais de precisao nos sensores
 
-#define FREQUENCIA_CHECK_SERIAL   50 // ms
-#define FREQUENCIA_CHECK_SENSORES 50 // ms
+#define FREQUENCIA_CHECK_SERIAL   5  // ms
+#define FREQUENCIA_CHECK_SENSORES 25 // ms
 
 #define TOTAL_RELES 8
 int pinosReles[TOTAL_RELES] = { 4,5,6,7, 12,13, -1,-1 };
@@ -225,8 +225,8 @@ void setup() {
     ; // wait for serial port to connect. Needed for native USB port only
   }
   
-  // start serial port at 9600 bps LINK WEMOS:
-  Serial1.begin(9600);
+  // start serial port at 115200 bps LINK WEMOS:
+  Serial1.begin(115200);
 
   // Sensores OneWire em IO2
   sensors.begin();
