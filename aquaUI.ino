@@ -1,28 +1,24 @@
 // WEMOS LOLIN32 - 80MHzs
 
-// Formato dos valores dos sensores que vem do Arduino Leonardo
-#define FORMATO_SENSORES "ADC0 ADC1 ADC2 ADC3 ADC4 ADC5 OW1 OW2 OW3 OW4 OW5 OW6 DIG1 DIG2 DIG3 DIG4 DIG5 DIG6 "
+// pH
+#define PH_OFFSET 0.3
 
 // Luz das plantas
 #define TEMPO_LUZ_PLANTAS_LIGA     630  //  6:30 da manha
 #define TEMPO_LUZ_PLANTAS_DESLIGA 1745  // 17:45 da tarde
 
 // Aquecedor 150W 1
-#define TEMPERATURA_MINIMA1 25.5
-#define TEMPERATURA_MAXIMA1 26.5
+#define TEMPERATURA_MINIMA1 26.3
+#define TEMPERATURA_MAXIMA1 26.7
 // Aquecedor 150W 2
-#define TEMPERATURA_MINIMA2 25.0
+#define TEMPERATURA_MINIMA2 26.0
 #define TEMPERATURA_MAXIMA2 27.0
 
 #define MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA 30000 // Se ficar mais de X (ms) abaix ou acima = agir
 #define MAX_TEMPO_SEM_AGUA 5000 // Tempo limite que o sensor de agua pode ficar sem agua (em ms) para disparar um alerta
 
 
-// Pinagem dos reles
-#define PINO_O_RELE1   12 // OUTPUT 12 = Luz das plantas
-#define PINO_O_RELE2   13 // OUTPUT 13 = Aquecedor de agua 150W 1
-#define PINO_O_RELE3   14 // OUTPUT 14 = Aquecedor de agua 150W 2
-#define PINO_O_RELE4   15 // OUTPUT 15 = Bomba de agua (NF)
+#define TEMPO_DURACAO_ALERTA 3000
 
 
 #define NTP_SERVER  "a.st1.ntp.br" // Servidor de NTP
@@ -33,6 +29,7 @@
 #define DISPLAY_PINO2 4
 
 
+float VCC = 500;
 
 #define TAMANHO_BUFFER_SERIAL 1024
 char bufferSerial[TAMANHO_BUFFER_SERIAL];
@@ -47,14 +44,8 @@ int enviaComandoLeo(char *cmd, ...);
 
 
 // Sensores
-float sensorPH     = -1;
-float sensorTEMP   = -1;
-float sensorTEMP_A = -1;
-
 char faltaAgua1 = -1, faltaAgua2 = -1;
 int tempoSemAgua1 = -1, tempoSemAgua2 = -1;
-
-char aqc1 = -1, aqc2 = -1; // Estado dos reles dos aquecedores
 int tempoTempBaixa1 = -1, tempoTempAlta1 = -1;
 int tempoTempBaixa2 = -1, tempoTempAlta2 = -1;
 
@@ -64,6 +55,13 @@ int tempoTempBaixa2 = -1, tempoTempAlta2 = -1;
 
 // Declarado por ultimo, da pau pra compilar...
 void msgPC(char *fmt, ... );
+
+
+
+
+#define TAMANHO_BUFFER_MEDIA_PH 64
+float bufferPH[TAMANHO_BUFFER_MEDIA_PH];
+int indexBufferPH = 0;
 
 
 class IO {
@@ -85,7 +83,7 @@ IO::IO(const char *_nome, const char *_nomeIO, float valorDefault) {
 
 
 #define TOTAL_SENSORES  8
-#define TOTAL_ATUADORES 8
+#define TOTAL_ATUADORES 4
 
 
 class Sensor : public IO {
@@ -97,13 +95,48 @@ class Sensor : public IO {
     int _set(int _valorRAW);
 };
 Sensor::Sensor(const char *_nome, const char *_nomeIO, float valorDefault) : IO(_nome, _nomeIO, valorDefault) {}
-Sensor::Sensor(const char *_nome, const char *_nomeIO) : IO(_nome, _nomeIO, 0) {}
+Sensor::Sensor(const char *_nome, const char *_nomeIO) : IO(_nome, _nomeIO, -1) {}
 
 int Sensor::_set(int _valorRAW) {
   valorRAW = _valorRAW;
 
-  // TODO
-  valor = valorRAW / 100.0;
+  if(nome == "pH") {
+      // pH
+      bufferPH[indexBufferPH] = (float)((14.0 - ((valorRAW / VCC) * 14.0)) + PH_OFFSET);
+      if (indexBufferPH >= TAMANHO_BUFFER_MEDIA_PH)
+        indexBufferPH = 0;
+
+      // Descartar os valores minimos e maximos e calcular a MEDIA
+      float max = -100000.0, min = 100000.0;
+      short idxMax = 0, idxMin = 0;
+      for (int c = 0; c < TAMANHO_BUFFER_MEDIA_PH; c++) {
+        if (bufferPH[c] > max) {
+          max = bufferPH[c];
+          idxMax = c;
+        }
+        if (bufferPH[c] < min) {
+          min = bufferPH[c];
+          idxMin = c;
+        }
+      }
+      float media = 0;
+      int   cntMedia = 0;
+      for (int c = 0; c < TAMANHO_BUFFER_MEDIA_PH; c++) {
+        if (c != idxMax && c != idxMin) {
+          media += bufferPH[c];
+          cntMedia++;
+        }
+      }
+    
+      valor = (media / cntMedia) + 0;
+      //Serial.print("sensorPH: ");
+      //Serial.println(valor);
+  } else if(nome == "temperatura") {
+    if (valorRAW > -100)
+      valor = valorRAW / 100.0;
+  } else {
+    valor = valorRAW / 100.0;
+  }
   
   return 0;
 }
@@ -132,31 +165,46 @@ class Atuador : public IO {
     int    set();
 
     
-    void liga();
-    void desliga();
+    void liga(int force, String motivo);
+    void desliga(int force, String motivo);
 };
 
 
-void Atuador::liga() {
+void Atuador::liga(int force, String motivo) {
+  if(!force && valor == HIGH)
+    return;
+  
   valor = HIGH;
   valorRAW = valor;
+
+  if(!force) msgPC("Ligando [%s] :: Motivo [%s]", nome.c_str(), motivo.c_str());
   
-  msgPC("Ligando %s (%s)", nome.c_str(), nomeIO.c_str());
+//msgPC("   Ligando %s (%s)", nome.c_str(), nomeIO.c_str());
   enviaComandoLeo("set%s=1", nomeIO.c_str());
 }
-void Atuador::desliga() {
+void Atuador::desliga(int force=0, String motivo="") {
+  if(!force && valor == LOW)
+    return;
+  
   valor = LOW;
   valorRAW = valor;
+
+  if(!force) msgPC("Desligando [%s] :: Motivo [%s]", nome.c_str(), motivo.c_str());
   
-  msgPC("DesLigando %s (%s)", nome.c_str(), nomeIO.c_str());
+//msgPC("   DesLigando %s (%s)", nome.c_str(), nomeIO.c_str());
   enviaComandoLeo("set%s=0", nomeIO.c_str());
 }
 
-Atuador atuadores[] = {  // 8 Reles do Arduino Leonardo (RELE[1..8])
+Atuador atuadores[TOTAL_ATUADORES] = {  // 8 Reles do Arduino Leonardo (RELE[1..8])
   Atuador("luzesPlantas",   "RELE1"),
   Atuador("aquecedor150W1", "RELE2"),
   Atuador("aquecedor150W2", "RELE3"),
-  Atuador("bombaAgua",      "RELE4") // Ligada no NF do rele (INVERTIDA >> 0 = LIGADA)
+  Atuador("bombaAgua",      "RELE4"), // Ligada no NF do rele (INVERTIDA >> 0 = LIGADA)
+// Desconectados
+/*  Atuador("Rele5",   "RELE5"),
+  Atuador("Rele6",   "RELE6"),
+  Atuador("Rele7",   "RELE7"),
+  Atuador("Rele8",   "RELE8")*/
 };
 
 
@@ -227,49 +275,12 @@ WiFiManager wifiManager;
 
 // DISPLAY ******************************************************************
 // Cenas
-// how many frames are there?
 int totalCenas = 5;
-
-/*int tempoCena1 = 4000; // 4s na primeira "Cena"
-  int tempoCena2 = 6000; // 6s na  segunda "Cena"
-
-  int duracaoLoop       = tempoCena1 + tempoCena2; // 10s de LOOP
-  int timePerFrameCena2 = (tempoCena2 / totalCenas);
-  int cena = -1;
-
-  void confereCenas() {
-  int msecAtual = millis(); // ms desde o boot
-  int msLoop    = (msecAtual % duracaoLoop); // = 0..(duracaoLoop-1) Num "frame" dentro do loop
-
-  int _cena = cena;                          // "Backup" de cena
-  int cena  = (msLoop < tempoCena1) ? 1 : 2; // Simples calculo de Cena atual baseado no tempo
-  int mudouCena = (_cena != cena);           // Detector de mudança de Cena
-
-  if (!mudouCena) return;
-
-  // Mudança de "Cena"
-  switch (cena) {
-    default:
-    case 1:
-      ui.switchToFrame(cena);
-      ui.disableAutoTransition();
-      break;
-
-    case 2:
-      int timePerTransition = (timePerFrameCena2 * 0.2);
-      ui.setTimePerFrame(timePerFrameCena2 - timePerTransition);
-      ui.setTimePerTransition(timePerTransition);
-      ui.enableAutoTransition();
-      break;
-  }
-  }*/
-
-
-
-
 
 // OVERLAY - frame sempre visivel
 void msOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
+  if((long)timeClient.getEpochTime() < 0) return;
+  
   display->setFont(ArialMT_Plain_10);
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->drawString(60, 0, timeClient.getFormattedTime());
@@ -288,11 +299,10 @@ void drawCena1(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16
 void drawCena2(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
   display->setTextAlignment(TEXT_ALIGN_LEFT);
   display->setFont(ArialMT_Plain_16);
-  display->drawString(0 + x, 12 + y, "pH:"  + String(sensorPH));   // probe pH
-  display->drawString(60 + x, 12 + y, "T:"  + String(sensorTEMP_A)); // OneWire Dallas DS18B20 temperature sensor
-  display->drawString(0 + x, 30 + y, "a1:"  + String(aqc1 ? "On" : "Off"));
-  display->drawString(64 + x, 30 + y, "a2:"  + String(aqc2 ? "On" : "Off"));
-  //display->drawString(0 + x, 44 + y, "Ag1:" + String(tempoSemAgua)); // Sensor de agua 1
+  display->drawString(0  + x, 12 + y, "pH:" + String(getSensor("pH")->valor));
+  display->drawString(60 + x, 12 + y, "T:"  + String(getSensor("temperatura")->valor));
+  display->drawString(0  + x, 30 + y, "a1:" + String(getAtuador("aquecedor150W1")->valor ? "On" : "Off"));
+  display->drawString(64 + x, 30 + y, "a2:" + String(getAtuador("aquecedor150W2")->valor ? "On" : "Off"));
 }
 
 #define NUM_CENA_ALERTA 3
@@ -326,16 +336,15 @@ void delayUI(int delayMS) {
   } while (millis() < msFinal);
 }
 
-#define TEMPO_DURACAO_ALERTA 3000
 boolean thread_apagarAlerta_callback(Task* task) {
   gMsgAlerta = "---";
-  ui.switchToFrame(NUM_CENA_DEFAULT);
+  ui.transitionToFrame(NUM_CENA_DEFAULT);
 }
-
 DelayRun thread_apagarAlerta(TEMPO_DURACAO_ALERTA, thread_apagarAlerta_callback);
+
 void alerta(String msg, int duracao = TEMPO_DURACAO_ALERTA) {
   gMsgAlerta = msg;
-  ui.switchToFrame(NUM_CENA_ALERTA);
+  ui.transitionToFrame(NUM_CENA_ALERTA);
 
   if (duracao < 1000) duracao = 1000;
   else if (duracao > 10000) duracao = 10000;
@@ -353,8 +362,7 @@ void initUI(int delayInicial) {
   ui.setTargetFPS(20);
 
   // Customize the active and inactive symbol
-  ui.setActiveSymbol(activeSymbol);
-  ui.setInactiveSymbol(inactiveSymbol);
+  ui.disableAllIndicators();
 
   // You can change this to
   // TOP, LEFT, BOTTOM, RIGHT
@@ -379,7 +387,7 @@ void initUI(int delayInicial) {
   //display.flipScreenVertically();
 
   //confereCenas();
-  ui.setTimePerTransition(1000);
+  ui.setTimePerTransition(800);
   ui.disableAutoTransition();
 
   gMsgAlerta = "Sem Problemas";
@@ -458,104 +466,120 @@ void initWifi() {
   timeClient.update();
 }
 
-void jsonAddAtrInt(char *string, const char *nomeAtr, int valAtr, int virgula = 1) {
-  int len = strlen(string);
-  char *str = &string[len];
+void enviaRespostaHTTP(WiFiClient client, String html, int code=200) {
+  // and a content-type so the client knows what's coming, then a blank line:
+  client.print("HTTP/1.1 ");
+  client.print(code);
+  client.print(" ");
+  if(code == 200)      client.println("OK");
+  else if(code == 404) client.println("Not Found");
+  else                 client.println("???");
+  client.println("Content-type:text/html");
+  client.println();
+  client.println(html);
+  client.println();
 
-  sprintf(str, virgula ? "\"%s\": %d," : "\"%s\": %d", nomeAtr, valAtr);
+  msgPC("httpServer: Enviada resposta %d [%s]", code, html.c_str());
 }
 
 // Processamento de conexoes na 80
 void handleHTTP(Task *t = NULL) {
-  WiFiClient client = server.available();   // listen for incoming clients
+  WiFiClient client = server.available();
   if (!client) return;
 
   // if you get a client,
-  msgPC("Conexao HTTP");          // print a message out the serial port
-  String currentLine = "", URL = "";      // make a String to hold incoming data from the client
-  int timeout = millis() + 50;
-  while (client.connected() && millis() < timeout) {            // loop while the client's connected
-    if (client.available()) {             // if there's bytes to read from the client,
-      char c = client.read();             // read a byte, then
-      //Serial.write(c);                    // print it out the serial monitor
-      if (c == '\n') {                    // if the byte is a newline character
+  msgPC("Conexao HTTP");
+  
+  String currentLine = "", URL = "";
+  int timeout = millis() + 250;
+  char c;
+  while (client.connected() && millis() < timeout) {
+    if (client.available()) {
+      c = client.read();
+      if (c == '\n') {
 
-        if (currentLine.startsWith("GET ") && URL == "")
+        //msgPC("URL:[%s] - currentLine:[%s]", URL.c_str(), currentLine.c_str());
+        
+        if (currentLine.startsWith("GET "))
           URL = currentLine;
 
-        // if the current line is blank, you got two newline characters in a row.
-        // that's the end of the client HTTP request, so send a response:
-        if (currentLine.length() == 0) {
-          // break out of the while loop:
-          break;
-        } else {    // if you got a newline, then clear currentLine:
-          currentLine = "";
-        }
-      } else if (c != '\r') {  // if you got anything else but a carriage return character,
-        currentLine += c;      // add it to the end of the currentLine
+        if (currentLine.length() == 0) break; // 2 "\n" seguidos
+        else                           currentLine = "";
+      } else if (c != '\r') {
+        currentLine += c;
       }
+    } else {
+      delay(1);
     }
   }
 
   msgPC("httpServer > URL: %s", URL.c_str());
 
-  if (URL != "") {
-    // Resposta HTML
-    // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-    // and a content-type so the client knows what's coming, then a blank line:
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-type:text/html");
-    client.println();
+  // Resposta HTML
+  if (URL.startsWith("GET /JSON ")) {
+    // Valores em JSON
+    String bufferHTML = "{";
+    for(int s=0; s<TOTAL_SENSORES; s++) {
+      bufferHTML += sensores[s].nome;
+      bufferHTML += ":";
+      bufferHTML += sensores[s].valor;
 
-    if (URL.startsWith("GET /JSON")) {
-      // Valores em JSON
-      char bufferJSON[256];
-      bufferJSON[0] = '{';
-      bufferJSON[1] = '\0';
+      if(s < TOTAL_SENSORES - 1)
+        bufferHTML += ",";
+    }
+    bufferHTML += "}";
 
-      jsonAddAtrInt(bufferJSON, "_TS",          timeClient.getEpochTime());
-      jsonAddAtrInt(bufferJSON, "pH",           sensorPH     * 100);
-      jsonAddAtrInt(bufferJSON, "temp",         sensorTEMP_A * 100);
-      jsonAddAtrInt(bufferJSON, "aqc1",         aqc1 ? 1 : 0);
-      jsonAddAtrInt(bufferJSON, "aqc2",         aqc2 ? 1 : 0);
-      //    jsonAddAtrInt(bufferJSON, "tempoSemAgua", tempoSemAgua);
-      jsonAddAtrInt(bufferJSON, "fim",          1, 0);
-
-      int len = strlen(bufferJSON);
-      bufferJSON[len]   = '}';
-      bufferJSON[len + 1] = '\0';
-
-      client.println(bufferJSON);
-    } else {
-      // Interface padrao
-      client.print("<a href=\"/LP1\">Ligar Luzes das plantas</a><br>");
-      client.print("<a href=\"/LP0\">Desligar Luzes das plantas</a><br><br>");
-
-      client.print("<a href=\"/AQC11\">Ligar Aquecedor 1</a><br>");
-      client.print("<a href=\"/AQC10\">Desligar Aquecedor 1</a><br>");
-      client.print("<a href=\"/AQC21\">Ligar Aquecedor 2</a><br>");
-      client.print("<a href=\"/AQC20\">Desligar Aquecedor 2</a><br><br>");
+    enviaRespostaHTTP(client, bufferHTML);
+  } else if (URL.startsWith("GET / ")) {
+    // Interface padrao
+    String bufferHTML = "";
+    for(int s=0; s<TOTAL_SENSORES; s++) {
+      bufferHTML += sensores[s].nome;
+      bufferHTML += " = ";
+      bufferHTML += sensores[s].valor;
+      bufferHTML += "<br>\n";
+    }
+    bufferHTML += "<br>\n";
+    
+    for(int a=0; a<TOTAL_ATUADORES; a++) {
+      bufferHTML += "<h2>";
+      bufferHTML += atuadores[a].nome;
+      bufferHTML += " <a href=\"/set";
+      bufferHTML += atuadores[a].nome;
+      bufferHTML += "=1\">Ligar</a>  - <a href=\"/set";
+      bufferHTML += atuadores[a].nome;
+      bufferHTML += "=0\">Desligar</a></h2><br><br>\n";
     }
 
-    // The HTTP response ends with another blank line:
-    client.println();
-    // *******************************************************************************
+    enviaRespostaHTTP(client, bufferHTML);
+  } else if (URL.startsWith("GET /set")) {
+    // Comandos HTTP
+    int posIgual = URL.indexOf("=");
 
-
-    // Verificar Comandos HTTP
-    if (URL.startsWith("GET /LP1")) digitalWrite(PINO_O_RELE1, HIGH);
-    if (URL.startsWith("GET /LP0")) digitalWrite(PINO_O_RELE1, LOW);
-
-    if (URL.startsWith("GET /AQC11")) digitalWrite(PINO_O_RELE2, HIGH);
-    if (URL.startsWith("GET /AQC10")) digitalWrite(PINO_O_RELE2, LOW);
-
-    if (URL.startsWith("GET /AQC21")) digitalWrite(PINO_O_RELE3, HIGH);
-    if (URL.startsWith("GET /AQC20")) digitalWrite(PINO_O_RELE3, LOW);
+    if(posIgual > 0) {
+      Atuador *at = getAtuador(URL.substring(8, posIgual));
+      if(at) {
+        enviaRespostaHTTP(client, "Setando Atuador");
+        
+        // SUPORTE APENAS A VALORES BOLEANOS POR ENQUANTO
+        if (URL.substring(posIgual + 1, posIgual + 2) == "1") at->liga(1, "Comando Web");
+        else                                                  at->desliga(1, "Comando Web");
+      } else {
+        enviaRespostaHTTP(client, "atuador nao encontrado");
+      }
+    } else {
+      enviaRespostaHTTP(client, "comando SET invalido");
+    }
+  } else if(URL != "") {
+    // 404 NF
+    enviaRespostaHTTP(client, "NF", 404);
+  } else {
+    enviaRespostaHTTP(client, "I'm a teapot", 418);
   }
+  // *******************************************************************************
 
   // close the connection:
   client.stop();
-  //Serial.println("Client Disconnected.");
 }
 #define TEMPO_POOLING_HTTP 100
 Task thread_httpServer(TEMPO_POOLING_HTTP, handleHTTP);
@@ -603,11 +627,9 @@ void pushbulletAPI(String msgAlerta) {
 
 
 
-float VCC = 5.00;
-
 int setSensor(char *nomeIO, int _valorRAW) {
   if(!strcmp(nomeIO, "VCC")) {
-    VCC = _valorRAW / 100.0;
+    VCC = _valorRAW;
     return 0;
   }
   
@@ -634,7 +656,7 @@ Sensor *getSensor(char *nomeIO) {
   // Erro??!?
   return (Sensor *)NULL;
 }
-Atuador *getAtuador(char *nome) {
+Atuador *getAtuador(String nome) {
   for(int a=0; a<TOTAL_ATUADORES; a++) {
     if(atuadores[a].nome == nome || atuadores[a].nomeIO == nome) {
       return &atuadores[a];
@@ -649,8 +671,7 @@ Atuador *getAtuador(char *nome) {
 
 
 
-#define TAMANHO_BUFFER_MEDIA_PH 64
-volatile short bufferPH[TAMANHO_BUFFER_MEDIA_PH], indexBufferPH = 0;
+
 
 volatile int msecSensores;
 
@@ -673,6 +694,8 @@ void atualizaSensores(Task* task = NULL) {
     return;
   }
 
+  //msgPC("bufferSerial cmd get: [%s]", bufferSerial);
+
   // Parse da string
   char *ptrLabel = strtok(&bufferSerial[1], ","); // Pular o "{" inicial
   char *ptrValor;
@@ -694,92 +717,55 @@ void atualizaSensores(Task* task = NULL) {
   }
 
 
-
-
-
-
-
-
-
-
-
-
-  float sensorVoltsPH    = getSensor("pH")->valor;
-  float sensorAgua1      = getSensor("nivelTanque1")->valor;
-  float sensorAgua2      = getSensor("nivelTanque2")->valor;
   
-  float sensorVoltsTemp  = getSensor("temperaturaProbePH")->valor;
-  float sensorTEMP_A_aux = getSensor("temperatura")->valor;
-  
-
-
-
-
-  /* pre Calcular/Formatar variaveis */
-
-  // pH
-  bufferPH[indexBufferPH++] = (1400.0 - ((sensorVoltsPH / VCC) * 1400.0)) + 30;
-
-  /*Serial.print("bufferPH[indexBufferPH = ");
-    Serial.print(String(indexBufferPH));
-    Serial.print("] = ");
-    Serial.println(String(bufferPH[indexBufferPH-1]));*/
-
-  if (indexBufferPH >= TAMANHO_BUFFER_MEDIA_PH)
-    indexBufferPH = 0;
-
-  int max = 0, min = 10000, idxMax = 0, idxMin = 15;
-  for (int c = 0; c < TAMANHO_BUFFER_MEDIA_PH; c++) {
-    if (bufferPH[c] > max) {
-      max = bufferPH[c];
-      idxMax = c;
-    }
-    if (bufferPH[c] < min) {
-      min = bufferPH[c];
-      idxMin = c;
-    }
-  }
-  int media = 0;
-  for (int c = 0; c < TAMANHO_BUFFER_MEDIA_PH; c++) {
-    if (c != idxMax && c != idxMin)
-      media += bufferPH[c];
-  }
-
-  sensorPH = ((media / (TAMANHO_BUFFER_MEDIA_PH - 2)) + 0) / 100.0;
-  //Serial.print("sensorPH: ");
-  //Serial.println(String(sensorPH));
-
-
-  // Temp
-  sensorTEMP = sensorVoltsTemp;
-
-  if (sensorTEMP_A_aux > -100) {
-    sensorTEMP_A = sensorTEMP_A_aux;
-  }
-
+/*
   // Sensor de agua1
+  float sensorAgua1 = getSensor("nivelTanque1")->valor;
   if ( sensorAgua1 < (VCC / 2) ) tempoSemAgua1 = 0;                        // Temos Agua
   else                           tempoSemAgua1 += tempoDesdeUltimaMedicao; // Acumular o tempo que estamos sem agua
+  // Sensor de agua2
+  float sensorAgua2 = getSensor("nivelTanque2")->valor;
+  if ( sensorAgua2 < (VCC / 2) ) tempoSemAgua2 = 0;
+  else                           tempoSemAgua2 += tempoDesdeUltimaMedicao;
+*/
 
-
+  float temperatura = getSensor("temperatura")->valor;
   // Tempo1 com temperatura Baixa
-  if ( sensorTEMP_A >= TEMPERATURA_MINIMA1 ) tempoTempBaixa1  = 0;
-  else                                       tempoTempBaixa1 += tempoDesdeUltimaMedicao;
+  if ( temperatura >= TEMPERATURA_MINIMA1 ) tempoTempBaixa1  = 0;
+  else                                      tempoTempBaixa1 += tempoDesdeUltimaMedicao;
   // Tempo1 com temperatura Alta
-  if ( sensorTEMP_A <= TEMPERATURA_MAXIMA1 ) tempoTempAlta1  = 0;
-  else                                       tempoTempAlta1 += tempoDesdeUltimaMedicao;
+  if ( temperatura <= TEMPERATURA_MAXIMA1 ) tempoTempAlta1  = 0;
+  else                                      tempoTempAlta1 += tempoDesdeUltimaMedicao;
 
   // Tempo2 com temperatura Baixa
-  if ( sensorTEMP_A >= TEMPERATURA_MINIMA2 ) tempoTempBaixa2  = 0;
-  else                                       tempoTempBaixa2 += tempoDesdeUltimaMedicao;
+  if ( temperatura >= TEMPERATURA_MINIMA2 ) tempoTempBaixa2  = 0;
+  else                                      tempoTempBaixa2 += tempoDesdeUltimaMedicao;
   // Tempo2 com temperatura Alta
-  if ( sensorTEMP_A <= TEMPERATURA_MAXIMA2 ) tempoTempAlta2  = 0;
-  else                                       tempoTempAlta2 += tempoDesdeUltimaMedicao;
+  if ( temperatura <= TEMPERATURA_MAXIMA2 ) tempoTempAlta2  = 0;
+  else                                      tempoTempAlta2 += tempoDesdeUltimaMedicao;
 }
 #define TEMPO_REFRESH_SENSORES 2000
 Task thread_atualizaSensores(TEMPO_REFRESH_SENSORES, atualizaSensores);
 
 
+
+
+
+
+
+
+void atualizaAtuadores(Task *t=NULL) {
+  //msgPC("refresh do estado dos Atuadores");
+  for(int a=0; a<TOTAL_ATUADORES; a++) {
+    //msgPC("setar Atuador \"%s\"(%s) = [%d]", atuadores[a].nome.c_str(), atuadores[a].nomeIO.c_str(), atuadores[a].valor);
+//if(TIPO_RELE)
+    atuadores[a].valor ?
+      atuadores[a].liga(1, "refresh") :
+      atuadores[a].desliga(1, "refresh");
+  }
+}
+#define TEMPO_REFRESH_ATUADORES 33000
+Task thread_atualizaAtuadores(TEMPO_REFRESH_ATUADORES, atualizaAtuadores);
 
 
 
@@ -795,27 +781,16 @@ Task thread_atualizaSensores(TEMPO_REFRESH_SENSORES, atualizaSensores);
 
 
 // Atua conforme o estado dos sensores (envia alertas via HHTPs)
-char aqc1_old = -1, aqc2_old = -1;
-char luzPlantas_old = -1;
 void confereAlertas(Task *t = NULL) {
   int msecAtual = millis();
 
   // Luz Plantas
-  char luzPlantas;
   int tempo = (timeClient.getHours() * 100) + timeClient.getMinutes();
 
-  //  printf("tempoLuzPlantas: %d \n", tempo);
-
-  luzPlantas = ( tempo < TEMPO_LUZ_PLANTAS_LIGA ) ? LOW : (( tempo >= TEMPO_LUZ_PLANTAS_DESLIGA ) ? LOW : HIGH);
-
-  if (luzPlantas != luzPlantas_old) {
-    luzPlantas_old = luzPlantas;
-    msgPC("LUZ PLANTAS MUDOU!!!");
-    
-    luzPlantas ?
-      getAtuador("luzesPlantas")->liga() :
-      getAtuador("luzesPlantas")->desliga();
-  }
+  char luzPlantas = ( tempo < TEMPO_LUZ_PLANTAS_LIGA ) ? LOW : (( tempo >= TEMPO_LUZ_PLANTAS_DESLIGA ) ? LOW : HIGH);
+  luzPlantas ?
+    getAtuador("luzesPlantas")->liga(0, "De dia!") :
+    getAtuador("luzesPlantas")->desliga(0, "De noite!");
 
   /*  // Flag de falta de agua
     faltaAgua = (tempoSemAgua1 > MAX_TEMPO_SEM_AGUA);
@@ -824,10 +799,8 @@ void confereAlertas(Task *t = NULL) {
       if (tsAcessoAPI < msecAtual) {
         tsAcessoAPI = msecAtual + 10000;
 
-        //ui.switchToFrame(1);
         Serial.println("ALERTAAAAAAA");
         //pushbulletAPI();
-        //alerta("Falta Agua!!!");
       }
       //} else {
       //tsAcessoAPI = 0;
@@ -835,36 +808,13 @@ void confereAlertas(Task *t = NULL) {
 
 
   // Aquecedor 1
-  if (tempoTempBaixa1 > MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA) { // ligar?
-    aqc1 = HIGH;
-  } else {
-    // Temp nao esta baixa, verificar se esta alta
-    aqc1 = (tempoTempAlta1 > MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA) ? LOW : HIGH;
-  }
-  if (aqc1 != aqc1_old) {
-    aqc1_old = aqc1;
-    msgPC("TEMPERATURA 1 MUDOU!!!");
+  if(tempoTempBaixa1 > MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA)     getAtuador("aquecedor150W1")->liga(0, "Temperatura1 Baixa");
+  else if(tempoTempAlta1 > MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA) getAtuador("aquecedor150W1")->desliga(0, "Temperatura1 Alta");
 
-    aqc1 ?
-      getAtuador("aquecedor150W1")->liga() :
-      getAtuador("aquecedor150W1")->desliga();
-  }
 
   // Aquecedor 2
-  if (tempoTempBaixa2 > MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA) { // ligar?
-    aqc2 = HIGH;
-  } else {
-    // Temp nao esta baixa, verificar se esta alta
-    aqc2 = (tempoTempAlta2 > MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA) ? LOW : HIGH;
-  }
-  if (aqc2 != aqc2_old) {
-    aqc2_old = aqc2;
-    msgPC("TEMPERATURA 2 MUDOU!!!");
-
-    aqc2 ?
-      getAtuador("aquecedor150W2")->liga() :
-      getAtuador("aquecedor150W2")->desliga();
-  }
+  if(tempoTempBaixa2 > MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA)     getAtuador("aquecedor150W2")->liga(0, "Temperatura2 Baixa");
+  else if(tempoTempAlta2 > MAX_TEMPO_TEMPERATURA_FORA_DA_FAIXA) getAtuador("aquecedor150W2")->desliga(0, "Temperatura2 Alta");
 }
 #define TEMPO_CONFERE_ALERTAS 3000
 Task thread_confereAlertas(TEMPO_CONFERE_ALERTAS, confereAlertas);
@@ -878,39 +828,34 @@ Task thread_confereAlertas(TEMPO_CONFERE_ALERTAS, confereAlertas);
 
 
 
-
 void setup() {
   // Comunicacao serial para ler sensores do Arduino Leonardo
-  Serial1.begin(9600, SERIAL_8N1, 0, 2);
+  Serial1.begin(115200, SERIAL_8N1, 0, 2);
 
   Serial.begin(9600);
   Serial.println();
   Serial.println();
 
   for (int c = 0; c < TAMANHO_BUFFER_MEDIA_PH; c++)
-    bufferPH[c] = 700;
-
-  // Pinagem IO
-  pinMode(PINO_O_RELE1, OUTPUT);
-  pinMode(PINO_O_RELE2, OUTPUT);
-  pinMode(PINO_O_RELE3, OUTPUT);
-  pinMode(PINO_O_RELE4, OUTPUT);
-
-  SoftTimer.add(&thread_atualizaSensores);
-  SoftTimer.add(&thread_confereAlertas);
-  SoftTimer.add(&thread_httpServer);
+    bufferPH[c] = 7.0;
 
   // Inicializar o display
-  initUI(1000);
+  initUI(500);
 
   ui.switchToFrame(0); // Logo WiFi
   // init WiFi
   initWifi();
 
-  ui.switchToFrame(1); // Mostrar IP
-  delayUI(1000);
+  ui.transitionToFrame(1); // Mostrar IP
+  delayUI(1200);
 
-  ui.switchToFrame(NUM_CENA_DEFAULT); // Tela Princiapl
+  SoftTimer.add(&thread_atualizaSensores);
+  SoftTimer.add(&thread_atualizaAtuadores);
+  SoftTimer.add(&thread_confereAlertas);
+  SoftTimer.add(&thread_httpServer);
+  SoftTimer.loop();
+
+  ui.transitionToFrame(NUM_CENA_DEFAULT); // Tela Principal
 
   msecSensores = millis();
 
@@ -965,7 +910,7 @@ int enviaComandoLeo(char *fmtCmd, ... ) {
   va_end (args);
 
   if(strcmp(fmtCmd, "get"))
-    msgPC("Enviando [%s] para Leo", buffCmd);
+    msgPC("     Enviando [%s] para Leo", buffCmd);
     
   Serial1.println(buffCmd);
   delay(10);
@@ -973,12 +918,12 @@ int enviaComandoLeo(char *fmtCmd, ... ) {
   for (int c = 0; c < TAMANHO_BUFFER_SERIAL; c++)
     bufferSerial[c] = '\0';
 
-  timeout = millis() + 1500;
+  timeout = millis() + 500;
   do {
     if (Serial1.available()) {
       cntBufferSerial++;
       bufferSerial[cntBufferSerial] = Serial1.read();
-      timeout = millis() + 1500;
+      timeout = millis() + 150;
     } else
       delay(1);
   } while (millis() < timeout && (cntBufferSerial < 0 || bufferSerial[cntBufferSerial] != '\n') && cntBufferSerial < TAMANHO_BUFFER_SERIAL - 1);
@@ -986,7 +931,7 @@ int enviaComandoLeo(char *fmtCmd, ... ) {
   bufferSerial[cntBufferSerial + 1] = '\0';
 
   if(strcmp(fmtCmd, "get"))
-    msgPC("RESP: [%s]", bufferSerial);
+    msgPC("       RESP: [%s]", bufferSerial);
   
   return cntBufferSerial;
 }
